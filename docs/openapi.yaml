@@ -1,0 +1,861 @@
+﻿openapi: 3.1.0
+info:
+  title: BookLeaf Author Support API
+  version: 1.0.0
+  description: Cookie-authenticated author and admin REST API. Mutations require X-CSRF-Token and the matching CSRF cookie.
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local development
+  - url: https://{apiHost}/api/v1
+    description: Deployed API
+    variables:
+      apiHost:
+        default: api.example.com
+security:
+  - authorSession: []
+    portalHeader: []
+  - adminSession: []
+    portalHeader: []
+tags:
+  - name: Health
+    description: Service availability.
+  - name: Authentication
+    description: Cookie session and CSRF endpoints.
+  - name: Authors
+    description: Author profile access and isolation.
+  - name: Books
+    description: Supplied author catalogue and royalty data.
+  - name: Tickets
+    description: Author ticket and conversation operations.
+  - name: Admin tickets
+    description: Support queue, triage, and response operations.
+paths:
+  /health:
+    get:
+      operationId: health_get
+      tags: [Health]
+      security: []
+      summary: Check API and database readiness
+      responses:
+        "200":
+          description: API and MongoDB connected.
+          content:
+            application/json:
+              example: { data: { status: ok, database: connected } }
+        "503": { description: Database unavailable. }
+  /auth/csrf:
+    get:
+      operationId: auth_csrf_get
+      tags: [Authentication]
+      security: []
+      summary: Issue a CSRF token and cookie
+      parameters:
+        - name: role
+          in: query
+          required: false
+          schema: { type: string, enum: [author, admin], default: author }
+          description: Selects the matching role-scoped CSRF cookie.
+      responses:
+        "200":
+          description: Token to echo in X-CSRF-Token for mutations.
+          content:
+            application/json:
+              example: { data: { csrfToken: <csrf-token> } }
+  /auth/login:
+    post:
+      operationId: auth_login_post
+      tags: [Authentication]
+      security: []
+      summary: Authenticate an author or admin
+      parameters:
+        - name: X-BookLeaf-Portal
+          in: header
+          required: false
+          schema: { type: string, enum: [author, admin] }
+          description: Selects the matching portal session and must match the account role when supplied.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                password: { type: string, minLength: 1, maxLength: 1024 }
+            example: { email: author@example.test, password: <demo-password> }
+      responses:
+        "200":
+          description: User and CSRF token returned; HTTP-only session and CSRF cookies set.
+          content:
+            application/json:
+              example:
+                {
+                  data:
+                    {
+                      user:
+                        {
+                          _id: AUTH001,
+                          role: author,
+                          name: Example Author,
+                          email: author@example.test,
+                        },
+                      csrfToken: <csrf-token>,
+                    },
+                }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/InvalidCredentials" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/me:
+    get:
+      operationId: auth_me_get
+      tags: [Authentication]
+      summary: Return current session user, without password hash
+      responses:
+        "200": { description: Current user profile. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /auth/logout:
+    post:
+      operationId: auth_logout_post
+      tags: [Authentication]
+      summary: Clear session and disconnect its sockets
+      parameters: [{ $ref: "#/components/parameters/CsrfHeader" }]
+      responses:
+        "204": { description: Cookies cleared. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/CsrfError" }
+  /authors/me:
+    get:
+      operationId: authors_me_get
+      tags: [Authors]
+      summary: Get authenticated author's own profile
+      responses:
+        "200": { description: Own author profile. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /authors:
+    get:
+      operationId: authors_get
+      tags: [Authors]
+      summary: List author records (admin only)
+      responses:
+        "200": { description: Author records without password hashes. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /authors/{authorId}:
+    get:
+      operationId: authors_authorId_get
+      tags: [Authors]
+      summary: Get an author profile
+      description: Admin may read any; an author may read only their own. Cross-author access is returned as 404.
+      parameters:
+        - { name: authorId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Author profile. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /books:
+    get:
+      operationId: books_get
+      tags: [Books]
+      summary: List visible books
+      description: Authors always receive only their own books. Admins may filter by authorId.
+      parameters:
+        - {
+            name: authorId,
+            in: query,
+            schema: { type: string },
+            description: Admin-only filter.,
+          }
+      responses:
+        "200":
+          description: Source catalogue and royalty snapshot values; null and zero are preserved.
+          content:
+            application/json:
+              example:
+                {
+                  data:
+                    {
+                      books:
+                        [
+                          {
+                            _id: BK001,
+                            authorId: AUTH001,
+                            title: Example Book,
+                            isbn: 978-93-5XXXX-01-1,
+                            status: Published & Live,
+                            mrp: 399,
+                            totalCopiesSold: 342,
+                            totalRoyaltyEarned: 11970,
+                            royaltyPaid: 8400,
+                            royaltyPending: 3570,
+                          },
+                        ],
+                    },
+                }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /tickets:
+    get:
+      operationId: tickets_get
+      tags: [Tickets]
+      summary: List visible tickets
+      parameters:
+        - {
+            name: status,
+            in: query,
+            schema:
+              {
+                type: string,
+                enum: [Open, In Progress, Waiting on Author, Resolved, Closed],
+              },
+          }
+        - {
+            name: category,
+            in: query,
+            schema:
+              {
+                type: string,
+                enum:
+                  [
+                    Royalty & Payments,
+                    ISBN & Metadata Issues,
+                    Printing & Quality,
+                    Distribution & Availability,
+                    Book Status & Production Updates,
+                    General Inquiry,
+                  ],
+              },
+          }
+        - {
+            name: priority,
+            in: query,
+            schema: { type: string, enum: [Critical, High, Medium, Low] },
+          }
+        - {
+            name: page,
+            in: query,
+            schema: { type: integer, minimum: 1, default: 1 },
+          }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 25 },
+          }
+      responses:
+        "200":
+          {
+            description: Paginated tickets. Author requests are scoped to session author.,
+          }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      operationId: tickets_post
+      tags: [Tickets]
+      summary: Create author ticket (author only)
+      parameters: [{ $ref: "#/components/parameters/CsrfHeader" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [subject, description]
+              properties:
+                bookId: { type: [string, "null"], maxLength: 80 }
+                subject: { type: string, minLength: 3, maxLength: 180 }
+                description: { type: string, minLength: 10, maxLength: 10000 }
+            example:
+              {
+                subject: Account question,
+                description: Please help me update my account details.,
+              }
+      responses:
+        "201":
+          {
+            description: Ticket and original public query created with Open status; author identity is session-derived.,
+          }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /tickets/{ticketId}:
+    parameters: [{ $ref: "#/components/parameters/TicketId" }]
+    get:
+      operationId: tickets_ticketId_get
+      tags: [Tickets]
+      summary: Get ticket detail and conversation
+      description: Owner or admin. Author payload omits internal notes, assignee, audit and AI-only fields.
+      responses:
+        "200": { description: Ticket and visible conversation messages. }
+        "400": { $ref: "#/components/responses/InvalidId" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /tickets/{ticketId}/conversation:
+    get:
+      operationId: tickets_ticketId_conversation_get
+      tags: [Tickets]
+      summary: Get ticket conversation
+      parameters: [{ $ref: "#/components/parameters/TicketId" }]
+      responses:
+        "200":
+          {
+            description: Owner or admin conversation; author view excludes internal notes.,
+          }
+        "400": { $ref: "#/components/responses/InvalidId" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /tickets/{ticketId}/messages:
+    post:
+      operationId: tickets_ticketId_messages_post
+      tags: [Tickets]
+      summary: Add author-visible message
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: false,
+                required: [body],
+                properties:
+                  { body: { type: string, minLength: 1, maxLength: 10000 } },
+              }
+            example: { body: Could you update me on this request? }
+      responses:
+        "201": { description: Public message created. }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/CsrfError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /tickets/{ticketId}/notes:
+    post:
+      operationId: tickets_ticketId_notes_post
+      tags: [Tickets]
+      summary: Add internal note (admin only)
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: false,
+                required: [body],
+                properties:
+                  { body: { type: string, minLength: 1, maxLength: 10000 } },
+              }
+      responses:
+        "201": { description: Private note created; not visible to authors. }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /tickets/{ticketId}/status:
+    patch:
+      operationId: tickets_ticketId_status_patch
+      tags: [Tickets]
+      summary: Change ticket status (admin only)
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: false,
+                required: [status],
+                properties:
+                  {
+                    status:
+                      {
+                        type: string,
+                        enum:
+                          [
+                            Open,
+                            In Progress,
+                            Waiting on Author,
+                            Resolved,
+                            Closed,
+                          ],
+                      },
+                  },
+              }
+      responses:
+        "200": { description: Status updated and audited. }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/tickets:
+    get:
+      operationId: admin_tickets_get
+      tags: [Admin tickets]
+      summary: Search and filter global ticket queue (admin only)
+      parameters:
+        - {
+            name: status,
+            in: query,
+            schema:
+              {
+                type: string,
+                enum: [Open, In Progress, Waiting on Author, Resolved, Closed],
+              },
+          }
+        - {
+            name: category,
+            in: query,
+            schema:
+              {
+                type: string,
+                enum:
+                  [
+                    Royalty & Payments,
+                    ISBN & Metadata Issues,
+                    Printing & Quality,
+                    Distribution & Availability,
+                    Book Status & Production Updates,
+                    General Inquiry,
+                  ],
+              },
+          }
+        - {
+            name: priority,
+            in: query,
+            schema: { type: string, enum: [Critical, High, Medium, Low] },
+          }
+        - {
+            name: page,
+            in: query,
+            schema: { type: integer, minimum: 1, default: 1 },
+          }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 25 },
+          }
+        - {
+            name: q,
+            in: query,
+            schema: { type: string, maxLength: 120 },
+            description: "Search subject, author name/email, or ticket ID (optionally BL-prefixed).",
+          }
+        - {
+            name: from,
+            in: query,
+            schema: { type: string, format: date },
+            description: Inclusive UTC creation date.,
+          }
+        - {
+            name: to,
+            in: query,
+            schema: { type: string, format: date },
+            description: Inclusive UTC creation date.,
+          }
+        - {
+            name: sort,
+            in: query,
+            schema:
+              {
+                type: string,
+                enum: [oldest, newest, activity],
+                default: oldest,
+              },
+          }
+        - {
+            name: assignee,
+            in: query,
+            schema: { type: string, enum: [any, me, unassigned], default: any },
+          }
+      responses:
+        "200":
+          {
+            description: Paginated queue with author/book/assignee and original-query context.,
+          }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/tickets/{ticketId}:
+    parameters: [{ $ref: "#/components/parameters/TicketId" }]
+    get:
+      operationId: admin_tickets_ticketId_get
+      tags: [Admin tickets]
+      summary: Get admin ticket context and first draft on demand
+      responses:
+        "200":
+          {
+            description: "Ticket, author/book context, messages, audit trail and AI draft state.",
+          }
+        "400": { $ref: "#/components/responses/InvalidId" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/tickets/{ticketId}/draft:
+    post:
+      operationId: admin_tickets_ticketId_draft_post
+      tags: [Admin tickets]
+      summary: Explicitly regenerate draft; does not send
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      responses:
+        "200": { description: AI draft state or safe provider failure state. }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/tickets/{ticketId}/category:
+    patch:
+      operationId: admin_tickets_ticketId_category_patch
+      tags: [Admin tickets]
+      summary: Override category
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: false,
+                required: [category],
+                properties:
+                  {
+                    category:
+                      {
+                        type: string,
+                        enum:
+                          [
+                            Royalty & Payments,
+                            ISBN & Metadata Issues,
+                            Printing & Quality,
+                            Distribution & Availability,
+                            Book Status & Production Updates,
+                            General Inquiry,
+                          ],
+                      },
+                  },
+              }
+      responses:
+        "200": { description: Human override saved and audited. }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/tickets/{ticketId}/priority:
+    patch:
+      operationId: admin_tickets_ticketId_priority_patch
+      tags: [Admin tickets]
+      summary: Override priority
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: false,
+                required: [priority],
+                properties:
+                  {
+                    priority:
+                      { type: string, enum: [Critical, High, Medium, Low] },
+                  },
+              }
+      responses:
+        "200": { description: Human override saved and audited. }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/tickets/{ticketId}/status:
+    patch:
+      operationId: admin_tickets_ticketId_status_patch
+      tags: [Admin tickets]
+      summary: Change ticket status
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: false,
+                required: [status],
+                properties:
+                  {
+                    status:
+                      {
+                        type: string,
+                        enum:
+                          [
+                            Open,
+                            In Progress,
+                            Waiting on Author,
+                            Resolved,
+                            Closed,
+                          ],
+                      },
+                  },
+              }
+      responses:
+        "200": { description: Status change saved and audited. }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/tickets/{ticketId}/assign-to-me:
+    post:
+      operationId: admin_tickets_ticketId_assign_to_me_post
+      tags: [Admin tickets]
+      summary: Assign ticket to authenticated admin
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      responses:
+        "200": { description: Assignment saved and audited. }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/tickets/{ticketId}/notes:
+    post:
+      operationId: admin_tickets_ticketId_notes_post
+      tags: [Admin tickets]
+      summary: Add private internal note
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: false,
+                required: [body],
+                properties:
+                  { body: { type: string, minLength: 1, maxLength: 10000 } },
+              }
+      responses:
+        "201":
+          {
+            description: Private note is persisted and emitted only to admin rooms.,
+          }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/tickets/{ticketId}/replies:
+    post:
+      operationId: admin_tickets_ticketId_replies_post
+      tags: [Admin tickets]
+      summary: Send reviewed public reply
+      parameters:
+        [
+          { $ref: "#/components/parameters/TicketId" },
+          { $ref: "#/components/parameters/CsrfHeader" },
+        ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: false,
+                required: [body],
+                properties:
+                  { body: { type: string, minLength: 1, maxLength: 10000 } },
+              }
+            example:
+              {
+                body: We will verify the account details and follow up through this ticket.,
+              }
+      responses:
+        "201":
+          {
+            description: Author-visible reply persisted; ticket moves to Waiting on Author.,
+          }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+components:
+  securitySchemes:
+    authorSession:
+      type: apiKey
+      in: cookie
+      name: bookleaf_session
+      description: Author-scoped HTTP-only session cookie set by POST /auth/login.
+    adminSession:
+      type: apiKey
+      in: cookie
+      name: bookleaf_admin_session
+      description: Admin-scoped HTTP-only session cookie set by POST /auth/login.
+    portalHeader:
+      type: apiKey
+      in: header
+      name: X-BookLeaf-Portal
+      description: Must be author or admin and selects the matching role cookie.
+  parameters:
+    CsrfHeader:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema: { type: string }
+      description: Token returned by GET /auth/csrf?role=author|admin or POST /auth/login; matching role-scoped CSRF cookie is also required.
+    TicketId:
+      name: ticketId
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-fA-F0-9]{24}$" }
+  responses:
+    ValidationError:
+      description: Invalid body, enum, filter, date, or pagination value.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            {
+              error: { code: VALIDATION_ERROR, message: Invalid request data. },
+              requestId: <request-id>,
+            }
+    Unauthenticated:
+      description: Missing, expired, or inactive session.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            {
+              error:
+                { code: UNAUTHENTICATED, message: Authentication is required. },
+              requestId: <request-id>,
+            }
+    InvalidCredentials:
+      description: Credentials do not match an active user.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            {
+              error:
+                {
+                  code: INVALID_CREDENTIALS,
+                  message: Email or password is incorrect.,
+                },
+              requestId: <request-id>,
+            }
+    Forbidden:
+      description: Role is insufficient, record is not owned, or action is disallowed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            {
+              error: { code: FORBIDDEN, message: This action is not allowed. },
+              requestId: <request-id>,
+            }
+    CsrfError:
+      description: CSRF cookie/header pair is absent or invalid.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            {
+              error:
+                {
+                  code: CSRF_INVALID,
+                  message: A valid CSRF token is required.,
+                },
+              requestId: <request-id>,
+            }
+    NotFound:
+      description: Record is missing or hidden from the caller.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            {
+              error: { code: TICKET_NOT_FOUND, message: Ticket not found. },
+              requestId: <request-id>,
+            }
+    InvalidId:
+      description: Ticket identifier is malformed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            {
+              error:
+                {
+                  code: INVALID_TICKET_ID,
+                  message: Ticket identifier is invalid.,
+                },
+              requestId: <request-id>,
+            }
+    RateLimited:
+      description: Login rate limit exceeded.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            {
+              error:
+                { code: LOGIN_RATE_LIMITED, message: Too many login attempts. },
+              requestId: <request-id>,
+            }
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error, requestId]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+        requestId: { type: string }

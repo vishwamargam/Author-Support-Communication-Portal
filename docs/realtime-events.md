@@ -1,0 +1,17 @@
+# Socket.IO event contract
+
+Socket.IO shares the Express HTTP server at `/api/v1/socket.io`. Handshakes authenticate the signed role-scoped session cookie against the active user record. The client includes `auth: { portal: "author" }` or `auth: { portal: "admin" }`, selecting `bookleaf_session` or `bookleaf_admin_session`. Admins automatically join `admin:queue`; individual rooms are joined only after `ticket:subscribe` is authorized. Room IDs are generated server-side. An author can join only the room for their ticket; admins can join an existing ticket's admin room.
+
+The client uses REST for initial state and after reconnect. Socket payloads indicate what to refresh. Every event includes a unique `eventId`, `ticketId`, and ISO `emittedAt` value unless noted. State changes are persisted before events are emitted.
+
+| Event                  | Recipients                                   | Payload                                                                                                | Meaning                                                                                              |
+| ---------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `queue:ticket-created` | Admin queue                                  | `{ eventId, ticketId, emittedAt }`                                                                     | Invalidate/refetch queue after ticket creation. No author profile is included.                       |
+| `queue:ticket-updated` | Admin queue                                  | `{ eventId, ticketId, emittedAt }`                                                                     | Invalidate/refetch queue after a relevant update.                                                    |
+| `ticket:updated`       | Authorized ticket room and admin ticket room | `{ eventId, ticketId, emittedAt, action, ticket: { id, status, category, priority, lastActivityAt } }` | Refresh ticket details/queue after status, assignment, category, priority, or classification change. |
+| `ticket:message`       | Owner author room and admin ticket room      | `{ eventId, ticketId, emittedAt, message: { id, ticketId, senderRole, body, createdAt } }`             | Public conversation message only.                                                                    |
+| `ticket:internal-note` | Admin ticket room and admin queue            | `{ eventId, ticketId, emittedAt, message: { id, ticketId, senderRole, body, createdAt } }`             | Private internal note. Never emitted to an author room.                                              |
+
+Subscribe with `socket.emit('ticket:subscribe', { ticketId }, ack)`. A successful acknowledgement is `{ ok: true, ticketId }`; failure is `{ ok: false, code }`, such as `INVALID_TICKET_ID`, `TICKET_NOT_FOUND`, or `FORBIDDEN`. Unsubscribe with `ticket:unsubscribe` and the same payload. Only the server chooses the room. Logout disconnects sockets associated with the session token.
+
+The client collapses duplicate event IDs and refetches REST data on connect/reconnect. If Socket.IO is unavailable, author ticket views and the admin queue poll REST every 15 seconds. See [QA_TEST_PLAN.md](../QA_TEST_PLAN.md) for automated authorization, internal-note privacy, and reconnect coverage.
